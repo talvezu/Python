@@ -1,3 +1,14 @@
+#!/usr/bin/env python
+#
+# Written by Nir I Levy
+# GitHub: https://github.com/talvezu
+# Email: talvezu@walla.com
+#
+# This code has been released under the terms of the Apache-2.0 license
+# http://opensource.org/licenses/Apache-2.0
+#
+
+
 from concurrent.futures import ThreadPoolExecutor
 from collections import OrderedDict, defaultdict
 import threading
@@ -16,9 +27,11 @@ task_{} - implementation of the 'generator-like' step
 class Base:
     i = {}
     status = {}
-    def __init__(self, i):
+    def __init__(self, i, done_queue):
         self.i = i
         self.status = "init"
+        self.done_queue = done_queue
+        print("new object")
         return
 
     def next(self):
@@ -26,18 +39,30 @@ class Base:
         return
 
     def done(self, fn):
+        message = {}
+        print("done task {} for id {}".format(self.status, self.i)) 
         if fn.cancelled():
             print('{}: canceled'.format(fn.arg))
+            code = "cancelled"
+            message = "cancelled due to user request"
         elif fn.done():
             error = fn.exception()
             if error:
-                print('{}: error returned: {}'.format(
-                    fn.arg, error))
+                print('{}: error returned: {}'.format(fn.arg, error))
+                code = "error"
+                message = "error received:" + error
             else:
                 result = fn.result()
-                print('{}: value returned: {}'.format(
-                    fn.arg, result))
-
+                print('{}: value returned: {}'.format(fn.arg, result))
+                code = "OK"
+                message = result
+        try:
+            #todo remove timeout
+            self.done_queue.put((self, code, message))
+            print("id:{} done callback for stage {}".format(self.i, self.status))
+        except queue.Empty:
+            print("task object queue for indicating done task full")
+    
 
 
 class A(Base):
@@ -65,7 +90,7 @@ class A(Base):
         if self.status == "triple":
             return self.task_quad()
         if self.status == "quad":
-            self.status = "done"
+            self.status = "done" 
             return self
         if self.status == "done":
             return self
@@ -85,6 +110,7 @@ class B(Base):
         return self
 
     def next(self):
+        print("next status from {} for id {}".format(self.status, self.i))
         if self.status == "init":
             return self.task_add()
         if self.status == "add":
@@ -96,22 +122,27 @@ class B(Base):
             return self
         print ("{} reached illegel state!".format(self.i))
         return self
+    
 
 '''
 holds dictionary of Futures
 every loop queue (new_tasks_queue) is checked and new tasks associated with uid granted a Future.
+
 later on every future is checked whereas done(), and result is saved in an orderedDict
 result are the iteration of the task returned by next.
+
 TODO:
 1)change the done() to the callback for iteration of next task.
 3)add clear of the operation
+     
 '''
-class context_manager(threading.Thread):
+class context_manager(threading.Thread):        
     Futures=dict()
     completed_futures = []
     results=defaultdict(OrderedDict)
     pool={}
     new_tasks_queue={}
+    done_tasks_queue={}
     def __init__(self, threads_count, name, threadID, q):
         threading.Thread.__init__(self)
         self.threadID = threadID
@@ -119,10 +150,9 @@ class context_manager(threading.Thread):
         squares=list(range(1,threads_count))
         self.pool = ThreadPoolExecutor(threads_count)
         self.new_tasks_queue=q
-
+        self.done_tasks_queue=queue.Queue()
+     
     def run(self):
-
-        memb = 190
         while True:
             more_task_requests = True
             task = {}
@@ -130,49 +160,49 @@ class context_manager(threading.Thread):
                 try:
                     task = self.new_tasks_queue.get(block=False)
                     uid = task[0]
-                    conv_obj = task[1]+'('+str(uid)+')'
-                    memb = memb+1
+                    #conv_obj = task[1]+'('+str(uid)+','+ str(self.done_tasks_queue)+')'
+                    conv_obj = task[1]+'('+str(uid)+','+ "self.done_tasks_queue"+')'
                     print ("conv object is : {}".format(conv_obj))
                     obj = eval(conv_obj)
-                    self.Futures[uid] = self.pool.submit(obj.next)
+                    #obj.next()                    
+                    self.Futures[uid] = self.pool.submit(obj.next)                
+                    self.Futures[uid].arg=obj.i
+                    self.Futures[uid].add_done_callback(obj.done)
                 except queue.Empty:
                     more_task_requests = False
+                    
+            done_task_requests = True    
+            while done_task_requests:
+                try:
+                    task = self.done_tasks_queue.get(block=False)
+                    obj = task[0]
+                    code = task[1]
+                    message = task[2]
+                    if code == "cancelled":
+                        print ("object: {}, {}".format(obj.i, message))
+                    if code == "error":
+                        print ("object: {}, {}".format(obj.i, message))
+                    if code == "OK":
+                        print ("object: {}, completed stage {}".format(obj.i, obj.status))
+                        if obj.status == "done":
+                            self.results[obj.i][obj.status] = "done"
+                            print("finished obj calculating: {}".format(obj.i))
+                        else:
+                            print("reinserting obj {} for next task: {}".format(obj.i, obj.status))
+                            self.Futures[obj.i] = self.pool.submit(obj.next)
+                            self.Futures[obj.i].arg=obj.i
+                            self.Futures[obj.i].add_done_callback(obj.done)
+                except queue.Empty:
+                    done_task_requests = False
 
-            for count, Future in self.Futures.items():
-                if Future.done():
-                    res = Future.result()
-                    self.completed_futures.append(count)
-                    obj = res
-                    self.results[obj.i][obj.status] = "done"
-                    print ("{} done".format(count))
-
-            if self.completed_futures:
-                for item in self.completed_futures:
-                    obj = self.Futures[item].result()
-                    print ("removing {} from Futures".format(item))
-                    del self.Futures[item]
-                    if obj.status == "done":
-                        print("finished obj calculating: {}".format(obj.i))
-                        #self.Futures[obj.i] = self.pool.submit(B.next, B(obj.i))
-                    else:
-                        print("reinserting obj {} for next task: {}".format(obj.i, obj.status))
-                        #self.Futures[obj.i] = self.pool.submit(A.next, obj )
-                        self.Futures[obj.i] = self.pool.submit(obj.next)
-                        self.Futures[obj.i].arg=obj.i
-                        self.Futures[obj.i].add_done_callback(obj.done)
-            del self.completed_futures[:]
-            if not self.Futures:
-                #print ("no more futures, exit")
-                time.sleep (1)
-                #break
-
+            time.sleep(1)
     def print_res(self):
         for item in self.results:
             print ("for: {}, results: {}".format(item, self.results[item]))
             #print
             #for key in self.result.item:
             #    print ("{}".format(self.result))
-
+            
 
 '''
 singletone used as design pattern to ensure only one context handling the messages
@@ -233,13 +263,15 @@ def dispatch_task( threadName, delay, q):
             uid = uuid.uuid4()
             uid_list.append(uid)
             obj = move
+            print("dispatching obj")
             q.put((uid.int, obj))
-        except queue.Empty:
-            print("empty queue")
-            more_task_requests = False
-
-
-
+        except queue.Full:
+            print("dispatch queue full")
+ 
+        
+   
 
 dispatcher = threading.Thread(target=dispatch_task, args=("dispatcher_thread",2 ,message_queue) )
 dispatcher.start()
+
+
